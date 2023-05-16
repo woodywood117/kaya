@@ -1,5 +1,5 @@
-use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct Message {
@@ -25,18 +25,21 @@ async fn main() {
 }
 
 async fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
-    let esize = stream.read_u32().await?;
-    let buf = &mut vec![0; esize as usize];
-    let asize = stream.read_exact(buf).await?;
+    loop {
+        let esize = stream.read_u32().await?;
+        let buf = &mut vec![0; esize as usize];
+        let asize = stream.read_exact(buf).await?;
 
-    if asize != esize as usize {
-        eprintln!("Error reading data from stream!");
-        return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Error reading data from stream!"));
+        if asize != esize as usize {
+            eprintln!("Error reading data from stream!");
+            stream.shutdown().await?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Error reading data from stream!",
+            ));
+        }
+
+        let message = serde_json::from_slice::<Message>(buf)?;
+        println!("Received message: {:?}", message);
     }
-
-    let message = serde_json::from_slice::<Message>(buf)?;
-    println!("Received message: {:?}", message);
-
-    stream.shutdown().await?;
-    Ok(())
 }
