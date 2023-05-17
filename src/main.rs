@@ -11,9 +11,9 @@ async fn main() {
     let (conn_sender, conn_receiver) = tokio::sync::mpsc::channel::<(String, OwnedWriteHalf)>(1);
     let (mesg_sender, mesg_receiver) = tokio::sync::mpsc::channel::<(String, String)>(1);
     let (close_sender, close_receiver) = tokio::sync::mpsc::channel::<(String, SocketAddr)>(1);
-    let mut topic_manager = topic_manager::TopicManager::new(conn_receiver, mesg_receiver, close_receiver);
+    let mut topic_manager = topic_manager::TopicManager::new();
     tokio::spawn(async move {
-        topic_manager.run().await;
+        topic_manager.run(conn_receiver, mesg_receiver, close_receiver).await;
     });
 
     let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
