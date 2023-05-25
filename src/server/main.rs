@@ -45,7 +45,7 @@ async fn main() {
 }
 
 async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io::Result<()> {
-	let sender: broadcast::Sender<Message>;
+	let mut sender: broadcast::Sender<Message>;
 	let mut receiver: broadcast::Receiver<Message>;
 
 	let (mut reader, mut writer) = stream.into_split();
@@ -81,8 +81,16 @@ async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io:
                             println!("Got a close connection");
                             return Ok(());
                         }
-                        Ok(Message::TopicChange(_topic)) => {
-                            println!("Got a topic change");
+                        Ok(Message::TopicChange(topic)) => {
+							// TODO: Check for topic len being under some size limit
+							// Check for a topic change and update the broadcaster
+							let mut bmap = state.lock().await;
+							let b = bmap.entry(topic.clone()).or_insert_with(|| {
+								let (s, _) = broadcast::channel(1);
+								s
+							});
+							sender = b.clone();
+							receiver = b.subscribe();
                         }
                         Ok(msg) => {
                             sender.send(msg).unwrap();
