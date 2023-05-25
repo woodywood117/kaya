@@ -3,114 +3,78 @@ use tokio::sync::{broadcast, Mutex};
 use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use serde::{Serialize, Deserialize};
 use postcard::{from_bytes, to_allocvec};
 use tokio::net::tcp::OwnedReadHalf;
+use kaya::{Message, ReadError};
+use clap::Parser;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-enum Message {
-    TopicChange(String),
-    Send(String),
-    CloseConnection,
-}
+type BroadcasterMap = Arc<Mutex<HashMap<String, broadcast::Sender<Message>>>>;
 
-struct Broadcaster {
-    sender: broadcast::Sender<Message>,
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+	/// Address to listen on
+	#[arg(short, long, default_value = "0.0.0.0")]
+	addr: String,
+	/// Port to listen on
+	#[arg(short, long, default_value = "8080")]
+	port: String,
 }
 
 #[tokio::main]
 async fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+	let args = Args::parse();
+	let addr = format!("{}:{}", args.addr, args.port);
 
-    let bmap: Arc<Mutex<HashMap<String, Broadcaster>>> = Arc::new(Mutex::new(HashMap::new()));
+	println!("Listening on {}", addr);
+	let listener = TcpListener::bind(addr).await.unwrap();
+	let bmap = BroadcasterMap::default();
 
-    loop {
-        let (stream, _) = listener.accept().await.unwrap();
-        let state = bmap.clone();
-        tokio::spawn(async move {
-            match handle_connection(stream, state).await {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("Error handling connection: {}", e);
-                }
-            }
-        });
-    }
+	loop {
+		let (stream, _) = listener.accept().await.unwrap();
+		let state = bmap.clone();
+		tokio::spawn(async move {
+			match handle_connection(stream, state).await {
+				Ok(_) => {}
+				Err(e) => {
+					eprintln!("Error handling connection: {}", e);
+				}
+			}
+		});
+	}
 }
 
-#[derive(Debug)]
-enum ReadError {
-    EndOfStream,
-    ReadSizeMismatch,
-    ConnectionError(std::io::Error),
-    PostcardError(postcard::Error),
-}
+async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io::Result<()> {
+	let sender: broadcast::Sender<Message>;
+	let mut receiver: broadcast::Receiver<Message>;
 
-async fn read_message(stream: &mut OwnedReadHalf) -> Result<Message, ReadError> {
-    let size: u32;
-    match stream.read_u32().await {
-        Ok(s) => {
-            if s == 0 {
-                return Err(ReadError::EndOfStream);
-            }
-            size = s;
-        }
-        Err(e) => {
-            return Err(ReadError::ConnectionError(e));
-        }
-    }
+	let (mut reader, mut writer) = stream.into_split();
 
-    let buf = &mut vec![0; size as usize];
-    match stream.read_exact(buf).await {
-        Ok(s) => {
-            if s == 0 {
-                return Err(ReadError::EndOfStream);
-            } else if s != size as usize {
-                return Err(ReadError::ReadSizeMismatch);
-            }
-            match from_bytes::<Message>(buf) {
-                Ok(m) => Ok(m),
-                Err(e) => Err(ReadError::PostcardError(e)),
-            }
-        }
-        Err(e) => {
-            Err(ReadError::ConnectionError(e))
-        }
-    }
-}
+	// Get the initial topic
+	match read_message(&mut reader).await {
+		Ok(Message::TopicChange(topic)) => {
+			// TODO: Check for topic len being under some size limit
+			// Check for a topic change and update the broadcaster
+			let mut bmap = state.lock().await;
+			let b = bmap.entry(topic.clone()).or_insert_with(|| {
+				let (s, _) = broadcast::channel(1);
+				s
+			});
+			sender = b.clone();
+			receiver = b.subscribe();
+		}
+		_ => {
+			// Close the connection if we get anything other than a TopicChange
+			return Ok(());
+		}
+	}
 
-async fn handle_connection(stream: TcpStream, state: Arc<Mutex<HashMap<String, Broadcaster>>>) -> std::io::Result<()> {
-    let sender: broadcast::Sender<Message>;
-    let mut receiver: broadcast::Receiver<Message>;
-
-    let (mut reader, mut writer) = stream.into_split();
-
-    // Get the initial topic
-    match read_message(&mut reader).await {
-        Ok(Message::TopicChange(topic)) => {
-            // Check for a topic change and update the broadcaster
-            let mut bmap = state.lock().await;
-            let b = bmap.entry(topic.clone()).or_insert_with(|| {
-                let (s, _) = broadcast::channel(1);
-                Broadcaster {
-                    sender: s,
-                }
-            });
-            sender = b.sender.clone();
-            receiver = b.sender.subscribe();
-        }
-        _ => {
-            // Close the connection if we get anything other than a TopicChange
-            return Ok(());
-        }
-    }
-
-    // Start listening for messages on the receiver and messages from other clients on the same topic
-    loop {
-        let handle = read_message(&mut reader);
-        tokio::pin!(handle);
-        loop {
-            tokio::select! {
+	// Start listening for messages on the receiver and messages from other clients on the same topic
+	loop {
+		let handle = read_message(&mut reader);
+		tokio::pin!(handle);
+		loop {
+			tokio::select! {
                 res = &mut handle => {
                     match res {
                         Ok(Message::CloseConnection) => {
@@ -146,42 +110,39 @@ async fn handle_connection(stream: TcpStream, state: Arc<Mutex<HashMap<String, B
                     }
                 }
             }
-        }
-    }
+		}
+	}
 }
 
-// Testing tokio select logic
-#[cfg(test)]
-mod tests {
-    async fn test1() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    }
-    async fn test2() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
+async fn read_message(stream: &mut OwnedReadHalf) -> Result<Message, ReadError> {
+	let size: u32;
+	match stream.read_u32().await {
+		Ok(s) => {
+			if s == 0 {
+				return Err(ReadError::EndOfStream);
+			}
+			size = s;
+		}
+		Err(e) => {
+			return Err(ReadError::ConnectionError(e));
+		}
+	}
 
-    #[tokio::test]
-    async fn test_read_message() {
-        let mut count = 0;
-        let mut handle1 = test1();
-        tokio::pin!(handle1);
-
-        loop {
-            tokio::select! {
-                _ = &mut handle1 => {
-                    println!("handle1 done");
-                    count += 1;
-                    if count == 2 {
-                        break;
-                    }
-
-                    handle1.set(test1());
-                }
-                _ = test2() => {
-                    println!("handle2 done");
-                }
-            }
-        }
-    }
+	let buf = &mut vec![0; size as usize];
+	match stream.read_exact(buf).await {
+		Ok(s) => {
+			if s == 0 {
+				return Err(ReadError::EndOfStream);
+			} else if s != size as usize {
+				return Err(ReadError::ReadSizeMismatch);
+			}
+			match from_bytes::<Message>(buf) {
+				Ok(m) => Ok(m),
+				Err(e) => Err(ReadError::PostcardError(e)),
+			}
+		}
+		Err(e) => {
+			Err(ReadError::ConnectionError(e))
+		}
+	}
 }
