@@ -5,6 +5,11 @@ pub enum Message {
 	TopicChange(String),
 	Send(String),
 	CloseConnection,
+	Acknowledge,
+	Error(String),
+	Custom(Vec<u8>),
+	Ping,
+	Pong,
 }
 
 #[derive(Debug)]
