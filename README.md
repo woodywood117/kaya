@@ -11,7 +11,7 @@ A message broker in Rust
 ## Todo
 - [x] Write initial server and client.
 - [x] Clean up message protocol.
-- [ ] Clean up topic handling logic.
+- [x] Clean up topic handling logic.
 - [ ] Make server distributed.
 - [ ] Genericize Library for external client use.
 - [ ] Store messages to disk for future reading.

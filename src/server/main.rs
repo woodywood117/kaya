@@ -8,7 +8,7 @@ use tokio::net::tcp::OwnedReadHalf;
 use kaya::{Message, ReadError};
 use clap::Parser;
 
-type BroadcasterMap = Arc<Mutex<HashMap<String, broadcast::Sender<Message>>>>;
+type BroadcasterMap = Arc<Mutex<HashMap<String, (i32, Option<broadcast::Sender<Message>>)>>>;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -47,6 +47,7 @@ async fn main() {
 async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io::Result<()> {
 	let mut sender: broadcast::Sender<Message>;
 	let mut receiver: broadcast::Receiver<Message>;
+	let mut conntopic: String;
 
 	let (mut reader, mut writer) = stream.into_split();
 
@@ -55,13 +56,17 @@ async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io:
 		Ok(Message::TopicChange(topic)) => {
 			// TODO: Check for topic len being under some size limit
 			// Check for a topic change and update the broadcaster
+			conntopic = topic.clone();
 			let mut bmap = state.lock().await;
 			let b = bmap.entry(topic.clone()).or_insert_with(|| {
 				let (s, _) = broadcast::channel(1);
-				s
+				(0, Some(s))
 			});
-			sender = b.clone();
-			receiver = b.subscribe();
+			let s = b.1.take().unwrap();
+			sender = s.clone();
+			receiver = sender.subscribe();
+			b.0 += 1;
+			b.1 = Some(s);
 		}
 		_ => {
 			// Close the connection if we get anything other than a TopicChange
@@ -84,13 +89,28 @@ async fn handle_connection(stream: TcpStream, state: BroadcasterMap) -> std::io:
                         Ok(Message::TopicChange(topic)) => {
 							// TODO: Check for topic len being under some size limit
 							// Check for a topic change and update the broadcaster
+							if conntopic == topic {
+								continue;
+							}
+							conntopic = topic.clone();
+							{
+								let mut bmap = state.lock().await;
+								let b = bmap.entry(topic.clone()).or_insert_with(|| {
+									(1, None)
+								});
+								b.0 -= 1;
+							}
+
 							let mut bmap = state.lock().await;
 							let b = bmap.entry(topic.clone()).or_insert_with(|| {
 								let (s, _) = broadcast::channel(1);
-								s
+								(1, Some(s))
 							});
-							sender = b.clone();
-							receiver = b.subscribe();
+							let s = b.1.take().unwrap();
+							sender = s.clone();
+							receiver = sender.subscribe();
+							b.0 += 1;
+							b.1 = Some(s);
                         }
                         Ok(msg) => {
                             sender.send(msg).unwrap();
